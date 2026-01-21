@@ -154,9 +154,6 @@ while true; do
         
         AGENT_SUMMARY=$(echo "$AGENT_JSON_OUTPUT" | jq -r '.summary')
         ALL_AGENT_SUMMARIES+="\n\n--- Summary from $AGENT_ROLE ---\n$AGENT_SUMMARY"
-
-        # Small delay to reduce rate limit pressure
-        sleep ${GROQ_BETWEEN_TASKS_SECONDS:-2}
     done
 
     # 3. SUMMARIZATION STEP
@@ -184,5 +181,4 @@ while true; do
     echo "Goal not yet complete. Preparing for next iteration."
     CURRENT_PROMPT="$NEXT_PROMPT"
     ITERATION=$(($ITERATION + 1))
-    sleep ${GROQ_BETWEEN_ITER_SECONDS:-2}
 done
