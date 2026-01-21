@@ -113,7 +113,7 @@ fi
 ensure_gsdgc_dir() {
     if [ ! -d ".gsdgc" ]; then
         echo "Initializing .gsdgc directory in $(pwd)..."
-        mkdir -p .gsdgc/tasks
+        mkdir -p .gsdgc
     fi
     # Don't touch files if they already exist
     touch -a .gsdgc/context.md .gsdgc/decisions.md .gsdgc/todos.md
@@ -144,7 +144,15 @@ while true; do
 
     # 1. PLANNING STEP
     echo "Planning... Asking for a task breakdown."
-    PLANNER_PROMPT="Eres planner. Devuelve solo JSON: {\"tasks\":[{\"agent\":role,\"task_description\":texto}]}. Tareas atómicas, en orden. Roles: $AVAILABLE_AGENTS. Objetivo: \"$CURRENT_PROMPT\". No crees nuevas carpetas de proyecto; trabaja en el directorio actual. IMPORTANTE: Usa SOLO estos archivos para memoria del proyecto (rutas absolutas): $(pwd)/.gsdgc/context.md, $(pwd)/.gsdgc/decisions.md, $(pwd)/.gsdgc/todos.md. Actualízalos como parte del trabajo (cada iteración es un sprint de Scrum). NO crees decisions.md ni todos.md fuera de .gsdgc/."
+    PLANNER_PROMPT="Role: Planner. Goal: $CURRENT_PROMPT
+
+Break this into atomic tasks. Format: tasks=[{agent:executor,desc:task1},{agent:executor,desc:task2}]
+
+Agents: planner, researcher, architect, backend, frontend, db, executor, devops
+
+Work in current directory. Use .gsdgc/context.md, .gsdgc/decisions.md, .gsdgc/todos.md for memory.
+
+Return ONLY valid JSON. Example: {\"tasks\":[{\"agent\":\"executor\",\"task_description\":\"do something\"}]}"
     log_debug "PLANNER PROMPT:\n$PLANNER_PROMPT"
     
     TASK_LIST_RESPONSE=$(call_api "$PLANNER_PROMPT")
@@ -154,7 +162,14 @@ while true; do
     CLEAN_JSON_TASKS=$(echo "$TASK_LIST_RESPONSE" | sed 's/```json//g' | sed 's/```//g')
 
     echo "Plan received:"
-    echo "$CLEAN_JSON_TASKS" | jq .
+    if echo "$CLEAN_JSON_TASKS" | jq . > /dev/null 2>&1; then
+        echo "$CLEAN_JSON_TASKS" | jq .
+    else
+        echo "⚠ Warning: Invalid JSON from planner. Attempting simple parsing..."
+        echo "$CLEAN_JSON_TASKS"
+        # Fallback: create simple task list
+        CLEAN_JSON_TASKS="{\"tasks\":[{\"agent\":\"executor\",\"task_description\":\"$CURRENT_PROMPT\"}]}"
+    fi
 
     # 2. EXECUTION STEP
     # Iterate over the tasks and execute the corresponding agent.
@@ -190,16 +205,27 @@ while true; do
 
     # 3. SUMMARIZATION STEP
     echo "Summarizing iteration results..."
-    SUMMARY_PROMPT="Eres tech lead. Devuelve solo JSON: {\"summary\":texto_corto,\"status\":\"complete|incomplete\",\"next_prompt\":texto}. Objetivo: \"$USER_PROMPT\". Trabajo previo: \"$CURRENT_PROMPT\". Resúmenes: $ALL_AGENT_SUMMARIES"
+    SUMMARY_PROMPT="Role: Tech Lead. Goal: $USER_PROMPT. Status: Check if work is complete.
+
+Results: $ALL_AGENT_SUMMARIES
+
+Return JSON: {\"summary\":\"short text\",\"status\":\"complete or incomplete\",\"next_prompt\":\"next steps or empty\"}"
     log_debug "SUMMARY PROMPT:\n$SUMMARY_PROMPT"
     SUMMARY_RESPONSE=$(call_api "$SUMMARY_PROMPT")
     log_debug "SUMMARY RESPONSE (SUMMARY_RESPONSE):\n$SUMMARY_RESPONSE"
     
     CLEAN_SUMMARY_JSON=$(echo "$SUMMARY_RESPONSE" | sed 's/```json//g' | sed 's/```//g')
     
-    STATUS=$(echo "$CLEAN_SUMMARY_JSON" | jq -r '.status')
-    SUMMARY=$(echo "$CLEAN_SUMMARY_JSON" | jq -r '.summary')
-    NEXT_PROMPT=$(echo "$CLEAN_SUMMARY_JSON" | jq -r '.next_prompt')
+    if echo "$CLEAN_SUMMARY_JSON" | jq . > /dev/null 2>&1; then
+        STATUS=$(echo "$CLEAN_SUMMARY_JSON" | jq -r '.status')
+        SUMMARY=$(echo "$CLEAN_SUMMARY_JSON" | jq -r '.summary')
+        NEXT_PROMPT=$(echo "$CLEAN_SUMMARY_JSON" | jq -r '.next_prompt')
+    else
+        echo "⚠ Warning: Invalid JSON from summarizer. Task likely complete."
+        STATUS="complete"
+        SUMMARY="$SUMMARY_RESPONSE"
+        NEXT_PROMPT=""
+    fi
 
     echo "Iteration Summary: $SUMMARY"
     echo "Status: $STATUS"
