@@ -1,0 +1,177 @@
+#!/bin/bash
+# Planner Agent: The main orchestrator script.
+
+set -e # Exit immediately if a command exits with a non-zero status.
+
+# --- Configuration & Setup ---
+# Get the absolute path of the directory where this script is located.
+SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &> /dev/null && pwd)
+PERSONAS_FILE="$SCRIPT_DIR/personas.json"
+AGENT_SCRIPT_PATH="$SCRIPT_DIR/gsdgc-agent"
+
+# Load environment variables from .env file
+if [ -f "$SCRIPT_DIR/.env" ]; then
+    export $(grep -v '^#' "$SCRIPT_DIR/.env" | xargs)
+fi
+
+# Source the groq-agent-executor functions
+source "$SCRIPT_DIR/groq-simple-agent.sh"
+
+# Function to call Groq API with retry/backoff
+call_groq() {
+    local prompt="$1"
+    local payload="{\"model\":\"$GROQ_MODEL\",\"messages\":[{\"role\":\"user\",\"content\":$(echo "$prompt" | jq -Rs .)}],\"temperature\":${GROQ_TEMPERATURE:-0.4},\"max_tokens\":${GROQ_MAX_TOKENS:-2000}}"
+
+    local response=$(groq_chat_request "$payload") || exit 1
+    local content=$(echo "$response" | jq -r '.choices[0].message.content // empty')
+
+    if [ -z "$content" ]; then
+        echo "Error calling Groq API: $response" >&2
+        exit 1
+    fi
+
+    echo "$content"
+}
+
+# Get the list of available agent roles from the personas.json file
+AVAILABLE_AGENTS=$(jq -r 'keys | @sh' "$PERSONAS_FILE" | sed "s/' '/ /g" | sed "s/'//g")
+
+# --- Argument Parsing ---
+AUTO_MODE=false
+DEBUG_MODE=false
+USER_PROMPT=""
+
+# This loop parses arguments. It now supports -d and --debug.
+while [[ "$#" -gt 0 ]]; do
+    case $1 in
+        -a|--auto) AUTO_MODE=true; shift ;;
+        -d|--debug) DEBUG_MODE=true; shift ;;
+        *)
+            if [[ -z "$USER_PROMPT" ]]; then
+                USER_PROMPT="$1"
+            else
+                # Append to USER_PROMPT if it's already set
+                USER_PROMPT="$USER_PROMPT $1"
+            fi
+            shift
+            ;;
+    esac
+done
+
+
+if [ -z "$USER_PROMPT" ]; then
+    echo "Usage: gsdgc \"<your-high-level-task>\" [-a|--auto] [-d|--debug]"
+    echo "Note: This script requires 'jq' to be installed for JSON parsing."
+    exit 1
+fi
+
+# --- Main Execution ---
+# Function to ensure the .gsdgc directory and essential files exist.
+ensure_gsdgc_dir() {
+    if [ ! -d ".gsdgc" ]; then
+        echo "Initializing .gsdgc directory in $(pwd)..."
+        mkdir -p .gsdgc/tasks
+    fi
+    # Don't touch files if they already exist
+    touch -a .gsdgc/context.md .gsdgc/decisions.md .gsdgc/todos.md
+}
+
+ensure_gsdgc_dir
+
+LOG_FILE="$(pwd)/.gsdgc/debug.log"
+
+# Logging function
+log_debug() {
+    if [ "$DEBUG_MODE" = true ]; then
+        echo -e "\n--- $(date) ---\n$1" >> "$LOG_FILE"
+    fi
+}
+
+# Initialize log file
+if [ "$DEBUG_MODE" = true ]; then
+    echo "Debug mode enabled. Log file at: $LOG_FILE"
+    > "$LOG_FILE"
+fi
+
+CURRENT_PROMPT="$USER_PROMPT"
+ITERATION=1
+
+while true; do
+    echo "--- Iteration $ITERATION ---"
+
+    # 1. PLANNING STEP
+    echo "Planning... Asking for a task breakdown."
+    PLANNER_PROMPT="Eres planner. Devuelve solo JSON: {\"tasks\":[{\"agent\":role,\"task_description\":texto}]}. Tareas atómicas, en orden. Roles: $AVAILABLE_AGENTS. Objetivo: \"$CURRENT_PROMPT\". No crees nuevas carpetas de proyecto; trabaja en el directorio actual. Usa los archivos ./.gsdgc/context.md, decisions.md, todos.md para contexto y actualízalos como parte del trabajo (cada iteración es un sprint de Scrum)."
+    log_debug "PLANNER PROMPT:\n$PLANNER_PROMPT"
+    
+    TASK_LIST_RESPONSE=$(call_groq "$PLANNER_PROMPT")
+    log_debug "PLANNER RESPONSE (TASK_LIST_RESPONSE):\n$TASK_LIST_RESPONSE"
+
+    # Extract the JSON from the response, removing markdown fences
+    CLEAN_JSON_TASKS=$(echo "$TASK_LIST_RESPONSE" | sed 's/```json//g' | sed 's/```//g')
+
+    echo "Plan received:"
+    echo "$CLEAN_JSON_TASKS" | jq .
+
+    # 2. EXECUTION STEP
+    # Iterate over the tasks and execute the corresponding agent.
+    ALL_AGENT_SUMMARIES=""
+    TASK_COUNT=$(echo "$CLEAN_JSON_TASKS" | jq '.tasks | length')
+
+    for i in $(seq 0 $(($TASK_COUNT - 1))); do
+        TASK_OBJ=$(echo "$CLEAN_JSON_TASKS" | jq ".tasks[$i]")
+        AGENT_ROLE=$(echo "$TASK_OBJ" | jq -r '.agent')
+        TASK_DESC=$(echo "$TASK_OBJ" | jq -r '.task_description')
+
+        echo "Executing task for agent role: $AGENT_ROLE"
+        echo "Task: $TASK_DESC"
+
+        if ! jq -e ".${AGENT_ROLE}" "$PERSONAS_FILE" > /dev/null; then
+            echo "Error: Agent role '$AGENT_ROLE' not found in personas.json."
+            exit 1
+        fi
+
+        AGENT_ARGS=("$AGENT_ROLE" "$TASK_DESC")
+        if [ "$DEBUG_MODE" = true ]; then
+            AGENT_ARGS+=("--debug")
+        fi
+        
+        AGENT_JSON_OUTPUT=$("$AGENT_SCRIPT_PATH" "${AGENT_ARGS[@]}")
+        
+        # The agent script now logs on its own, but we can log the summary received.
+        log_debug "AGENT ($AGENT_ROLE) SUMMARY:\n$(echo "$AGENT_JSON_OUTPUT" | jq -r '.summary')"
+        
+        AGENT_SUMMARY=$(echo "$AGENT_JSON_OUTPUT" | jq -r '.summary')
+        ALL_AGENT_SUMMARIES+="\n\n--- Summary from $AGENT_ROLE ---\n$AGENT_SUMMARY"
+
+        # Small delay to reduce rate limit pressure
+        sleep ${GROQ_BETWEEN_TASKS_SECONDS:-2}
+    done
+
+    # 3. SUMMARIZATION STEP
+    echo "Summarizing iteration results..."
+    SUMMARY_PROMPT="Eres tech lead. Devuelve solo JSON: {\"summary\":texto_corto,\"status\":\"complete|incomplete\",\"next_prompt\":texto}. Objetivo: \"$USER_PROMPT\". Trabajo previo: \"$CURRENT_PROMPT\". Resúmenes: $ALL_AGENT_SUMMARIES"
+    log_debug "SUMMARY PROMPT:\n$SUMMARY_PROMPT"
+    SUMMARY_RESPONSE=$(call_groq "$SUMMARY_PROMPT")
+    log_debug "SUMMARY RESPONSE (SUMMARY_RESPONSE):\n$SUMMARY_RESPONSE"
+    
+    CLEAN_SUMMARY_JSON=$(echo "$SUMMARY_RESPONSE" | sed 's/```json//g' | sed 's/```//g')
+    
+    STATUS=$(echo "$CLEAN_SUMMARY_JSON" | jq -r '.status')
+    SUMMARY=$(echo "$CLEAN_SUMMARY_JSON" | jq -r '.summary')
+    NEXT_PROMPT=$(echo "$CLEAN_SUMMARY_JSON" | jq -r '.next_prompt')
+
+    echo "Iteration Summary: $SUMMARY"
+    echo "Status: $STATUS"
+
+    # 4. LOOP CONTROL
+    if [ "$STATUS" == "complete" ] || [ "$AUTO_MODE" == false ]; then
+        echo "Workflow finished."
+        break
+    fi
+
+    echo "Goal not yet complete. Preparing for next iteration."
+    CURRENT_PROMPT="$NEXT_PROMPT"
+    ITERATION=$(($ITERATION + 1))
+    sleep ${GROQ_BETWEEN_ITER_SECONDS:-2}
+done

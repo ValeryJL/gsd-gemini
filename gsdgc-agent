@@ -1,0 +1,118 @@
+#!/bin/bash
+# Generic Agent Script: Executes a task for a given agent role.
+
+set -e
+
+# Get script directory
+SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &> /dev/null && pwd)
+
+# Load environment variables from .env file
+if [ -f "$SCRIPT_DIR/.env" ]; then
+    export $(grep -v '^#' "$SCRIPT_DIR/.env" | xargs)
+fi
+
+# Source the groq-agent-executor functions
+source "$SCRIPT_DIR/groq-simple-agent.sh"
+
+# Simple Groq call without tools (for planner, researcher)
+call_groq() {
+    local prompt="$1"
+    local payload="{\"model\":\"$GROQ_MODEL\",\"messages\":[{\"role\":\"user\",\"content\":$(echo "$prompt" | jq -Rs .)}],\"temperature\":${GROQ_TEMPERATURE:-0.4},\"max_tokens\":${GROQ_MAX_TOKENS:-2000}}"
+
+    local response=$(groq_chat_request "$payload") || exit 1
+    local content=$(echo "$response" | jq -r '.choices[0].message.content // empty')
+
+    if [ -z "$content" ]; then
+        echo "Error calling Groq API: $response" >&2
+        exit 1
+    fi
+
+    echo "$content"
+}
+
+# Logging function
+log_debug() {
+    if [ "$DEBUG_MODE" = true ]; then
+        echo -e "\n--- $(date) ---\n[AGENT: $AGENT_ROLE]\n$1" >> "$LOG_FILE"
+    fi
+}
+
+# --- Argument Parsing ---
+DEBUG_MODE=false
+AGENT_ROLE=""
+TASK_DESC=""
+
+while [[ "$#" -gt 0 ]]; do
+    case $1 in
+        --debug) DEBUG_MODE=true; shift ;;
+        *)
+            if [ -z "$AGENT_ROLE" ]; then
+                AGENT_ROLE="$1"
+            elif [ -z "$TASK_DESC" ]; then
+                TASK_DESC="$1"
+            else
+                # Append to TASK_DESC if it's already set
+                TASK_DESC="$TASK_DESC $1"
+            fi
+            shift
+            ;;
+    esac
+done
+
+
+if [ -z "$AGENT_ROLE" ] || [ -z "$TASK_DESC" ]; then
+    echo "{\"error\":\"Usage: gsdgc-agent <agent_role> '<task_description>' [--debug]'\"}"
+    exit 1
+fi
+
+CONTEXT_DIR=$(pwd)
+SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &> /dev/null && pwd)
+PERSONAS_FILE="$SCRIPT_DIR/personas.json"
+LOG_FILE="$(pwd)/.gsdgc/debug.log"
+
+log_debug "Starting agent..."
+log_debug "Role: $AGENT_ROLE"
+log_debug "Task: $TASK_DESC"
+
+# Read the persona from the personas.json file
+PERSONA=$(jq -r ".${AGENT_ROLE}" "$PERSONAS_FILE")
+
+if [ -z "$PERSONA" ] || [ "$PERSONA" == "null" ]; then
+    echo "{\"error\":\"Agent role '$AGENT_ROLE' not found in personas.json\"}"
+    exit 1
+fi
+
+# Prompt compacto para ahorrar tokens
+GEMINI_PROMPT="$PERSONA
+
+Contexto: $CONTEXT_DIR (no crees nuevas carpetas de proyecto; trabaja aquí).
+Memoria: ./.gsdgc/context.md, decisions.md, todos.md. Úsalos/actualízalos; cada iteración es un sprint de Scrum.
+Tarea: \"$TASK_DESC\"
+
+Respeta el lenguaje solicitado; si no se especifica, prioriza Python. No uses npm/node ni generes proyectos JS salvo que se pida explícitamente. No escribas código ni archivos en .gsdgc (solo context/decisions/todos). Evita instalaciones/config pesadas (pip install/setup.py) salvo requerimiento explícito; prefiere stdlib y cambios mínimos. Devuelve JSON de acciones o resumen final corto (<=60 palabras)."
+
+log_debug "AGENT PROMPT:\n$GEMINI_PROMPT"
+
+# Determine if this agent needs tools
+# Only executor, backend, frontend, db, architect, and devops need tools
+NEEDS_TOOLS=false
+case "$AGENT_ROLE" in
+    executor|backend|frontend|db|architect|devops)
+        NEEDS_TOOLS=true
+        ;;
+esac
+
+# Call Groq with or without tool support
+if [ "$NEEDS_TOOLS" = true ]; then
+    AGENT_RESPONSE=$(call_groq_agent "$GEMINI_PROMPT" 15)
+else
+    AGENT_RESPONSE=$(call_groq "$GEMINI_PROMPT")
+fi
+
+log_debug "AGENT RESPONSE (AGENT_RESPONSE):\n$AGENT_RESPONSE"
+
+# The summary is the direct response
+SUMMARY="$AGENT_RESPONSE"
+
+# The final output of this script is a JSON object with the summary for the planner.
+jq -n --arg summary "$SUMMARY" '{"summary":$summary}'
