@@ -22,22 +22,45 @@ case "$AGENT_BACKEND" in
     groq)
         source "$SCRIPT_DIR/agents/groq/groq-simple-agent.sh"
         ;;
+    gemini)
+        source "$SCRIPT_DIR/agents/gemini/gemini-agent.sh"
+        ;;
+    github)
+        source "$SCRIPT_DIR/agents/github/github-agent.sh"
+        ;;
     *)
-        echo "Error: Unknown AGENT_BACKEND=$AGENT_BACKEND" >&2
+        echo "Error: Unknown AGENT_BACKEND=$AGENT_BACKEND (valid: groq, gemini, github)" >&2
         exit 1
         ;;
 esac
 
-# Function to call Groq API with retry/backoff
-call_groq() {
+# Function to call API with retry/backoff (adapts to selected backend)
+call_api() {
     local prompt="$1"
-    local payload="{\"model\":\"$GROQ_MODEL\",\"messages\":[{\"role\":\"user\",\"content\":$(echo "$prompt" | jq -Rs .)}],\"temperature\":${GROQ_TEMPERATURE:-0.4},\"max_tokens\":${GROQ_MAX_TOKENS:-2000}}"
-
-    local response=$(groq_chat_request "$payload") || exit 1
-    local content=$(echo "$response" | jq -r '.choices[0].message.content // empty')
+    
+    case "$AGENT_BACKEND" in
+        groq)
+            local payload="{\"model\":\"$GROQ_MODEL\",\"messages\":[{\"role\":\"user\",\"content\":$(echo "$prompt" | jq -Rs .)}],\"temperature\":${GROQ_TEMPERATURE:-0.4},\"max_tokens\":${GROQ_MAX_TOKENS:-2000}}"
+            local response=$(groq_chat_request "$payload") || exit 1
+            local content=$(echo "$response" | jq -r '.choices[0].message.content // empty')
+            ;;
+        github)
+            local payload="{\"model\":\"$GITHUB_MODEL\",\"messages\":[{\"role\":\"user\",\"content\":$(echo "$prompt" | jq -Rs .)}],\"temperature\":${GITHUB_TEMPERATURE:-0.4},\"max_tokens\":${GITHUB_MAX_TOKENS:-2000}}"
+            local response=$(github_chat_request "$payload") || exit 1
+            local content=$(echo "$response" | jq -r '.choices[0].message.content // empty')
+            ;;
+        gemini)
+            local response=$("$GEMINI_CLI_PATH" -p "$prompt" --output-format json 2>&1)
+            local content=$(echo "$response" | jq -r '.response // .content // .' 2>/dev/null)
+            ;;
+        *)
+            echo "Error: Unknown AGENT_BACKEND=$AGENT_BACKEND" >&2
+            exit 1
+            ;;
+    esac
 
     if [ -z "$content" ]; then
-        echo "Error calling Groq API: $response" >&2
+        echo "Error calling $AGENT_BACKEND API: $response" >&2
         exit 1
     fi
 
@@ -115,7 +138,7 @@ while true; do
     PLANNER_PROMPT="Eres planner. Devuelve solo JSON: {\"tasks\":[{\"agent\":role,\"task_description\":texto}]}. Tareas atómicas, en orden. Roles: $AVAILABLE_AGENTS. Objetivo: \"$CURRENT_PROMPT\". No crees nuevas carpetas de proyecto; trabaja en el directorio actual. Usa los archivos ./.gsdgc/context.md, decisions.md, todos.md para contexto y actualízalos como parte del trabajo (cada iteración es un sprint de Scrum)."
     log_debug "PLANNER PROMPT:\n$PLANNER_PROMPT"
     
-    TASK_LIST_RESPONSE=$(call_groq "$PLANNER_PROMPT")
+    TASK_LIST_RESPONSE=$(call_api "$PLANNER_PROMPT")
     log_debug "PLANNER RESPONSE (TASK_LIST_RESPONSE):\n$TASK_LIST_RESPONSE"
 
     # Extract the JSON from the response, removing markdown fences
@@ -160,7 +183,7 @@ while true; do
     echo "Summarizing iteration results..."
     SUMMARY_PROMPT="Eres tech lead. Devuelve solo JSON: {\"summary\":texto_corto,\"status\":\"complete|incomplete\",\"next_prompt\":texto}. Objetivo: \"$USER_PROMPT\". Trabajo previo: \"$CURRENT_PROMPT\". Resúmenes: $ALL_AGENT_SUMMARIES"
     log_debug "SUMMARY PROMPT:\n$SUMMARY_PROMPT"
-    SUMMARY_RESPONSE=$(call_groq "$SUMMARY_PROMPT")
+    SUMMARY_RESPONSE=$(call_api "$SUMMARY_PROMPT")
     log_debug "SUMMARY RESPONSE (SUMMARY_RESPONSE):\n$SUMMARY_RESPONSE"
     
     CLEAN_SUMMARY_JSON=$(echo "$SUMMARY_RESPONSE" | sed 's/```json//g' | sed 's/```//g')

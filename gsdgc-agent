@@ -19,22 +19,46 @@ case "$AGENT_BACKEND" in
     groq)
         source "$SCRIPT_DIR/agents/groq/groq-simple-agent.sh"
         ;;
+    gemini)
+        source "$SCRIPT_DIR/agents/gemini/gemini-agent.sh"
+        ;;
+    github)
+        source "$SCRIPT_DIR/agents/github/github-agent.sh"
+        ;;
     *)
-        echo "Error: Unknown AGENT_BACKEND=$AGENT_BACKEND" >&2
+        echo "Error: Unknown AGENT_BACKEND=$AGENT_BACKEND (valid: groq, gemini, github)" >&2
         exit 1
         ;;
 esac
 
-# Simple Groq call without tools (for planner, researcher)
-call_groq() {
+# Simple API call without tools (for planner, researcher)
+# This function adapts to the selected backend
+call_simple() {
     local prompt="$1"
-    local payload="{\"model\":\"$GROQ_MODEL\",\"messages\":[{\"role\":\"user\",\"content\":$(echo "$prompt" | jq -Rs .)}],\"temperature\":${GROQ_TEMPERATURE:-0.4},\"max_tokens\":${GROQ_MAX_TOKENS:-2000}}"
-
-    local response=$(groq_chat_request "$payload") || exit 1
-    local content=$(echo "$response" | jq -r '.choices[0].message.content // empty')
+    
+    case "$AGENT_BACKEND" in
+        groq)
+            local payload="{\"model\":\"$GROQ_MODEL\",\"messages\":[{\"role\":\"user\",\"content\":$(echo "$prompt" | jq -Rs .)}],\"temperature\":${GROQ_TEMPERATURE:-0.4},\"max_tokens\":${GROQ_MAX_TOKENS:-2000}}"
+            local response=$(groq_chat_request "$payload") || exit 1
+            local content=$(echo "$response" | jq -r '.choices[0].message.content // empty')
+            ;;
+        github)
+            local payload="{\"model\":\"$GITHUB_MODEL\",\"messages\":[{\"role\":\"user\",\"content\":$(echo "$prompt" | jq -Rs .)}],\"temperature\":${GITHUB_TEMPERATURE:-0.4},\"max_tokens\":${GITHUB_MAX_TOKENS:-2000}}"
+            local response=$(github_chat_request "$payload") || exit 1
+            local content=$(echo "$response" | jq -r '.choices[0].message.content // empty')
+            ;;
+        gemini)
+            local response=$("$GEMINI_CLI_PATH" -p "$prompt" --output-format json 2>&1)
+            local content=$(echo "$response" | jq -r '.response // .content // .' 2>/dev/null)
+            ;;
+        *)
+            echo "Error: Unknown AGENT_BACKEND=$AGENT_BACKEND" >&2
+            exit 1
+            ;;
+    esac
 
     if [ -z "$content" ]; then
-        echo "Error calling Groq API: $response" >&2
+        echo "Error calling $AGENT_BACKEND API: $response" >&2
         exit 1
     fi
 
@@ -113,11 +137,23 @@ case "$AGENT_ROLE" in
         ;;
 esac
 
-# Call Groq with or without tool support
+# Call backend with or without tool support
 if [ "$NEEDS_TOOLS" = true ]; then
-    AGENT_RESPONSE=$(call_groq_agent "$GEMINI_PROMPT" 15)
+    # Use tool-enabled agent function based on backend
+    case "$AGENT_BACKEND" in
+        groq)
+            AGENT_RESPONSE=$(call_groq_agent "$GEMINI_PROMPT" 15)
+            ;;
+        github)
+            AGENT_RESPONSE=$(call_github_agent "$GEMINI_PROMPT" 15)
+            ;;
+        gemini)
+            AGENT_RESPONSE=$(call_gemini_agent "$GEMINI_PROMPT" 15)
+            ;;
+    esac
 else
-    AGENT_RESPONSE=$(call_groq "$GEMINI_PROMPT")
+    # Simple call without tools
+    AGENT_RESPONSE=$(call_simple "$GEMINI_PROMPT")
 fi
 
 log_debug "AGENT RESPONSE (AGENT_RESPONSE):\n$AGENT_RESPONSE"
