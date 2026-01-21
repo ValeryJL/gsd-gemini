@@ -28,8 +28,11 @@ case "$AGENT_BACKEND" in
     github)
         source "$SCRIPT_DIR/agents/github/github-agent.sh"
         ;;
+    ollama)
+        source "$SCRIPT_DIR/agents/ollama/ollama-agent.sh"
+        ;;
     *)
-        echo "Error: Unknown AGENT_BACKEND=$AGENT_BACKEND (valid: groq, gemini, github)" >&2
+        echo "Error: Unknown AGENT_BACKEND=$AGENT_BACKEND (valid: groq, gemini, github, ollama)" >&2
         exit 1
         ;;
 esac
@@ -52,6 +55,12 @@ call_api() {
         gemini)
             local response=$("$GEMINI_CLI_PATH" -p "$prompt" --output-format json 2>&1)
             local content=$(echo "$response" | jq -r '.response // .content // .' 2>/dev/null)
+            ;;
+        ollama)
+            local messages="[{\"role\": \"user\", \"content\": $(echo "$prompt" | jq -Rs .)}]"
+            local payload="{\"model\":\"$OLLAMA_MODEL\",\"messages\":$messages,\"stream\":false,\"options\":{\"temperature\":${OLLAMA_TEMPERATURE:-0.4},\"num_predict\":${OLLAMA_MAX_TOKENS:-2000}}}"
+            local response=$(ollama_chat_request "$payload") || exit 1
+            local content=$(echo "$response" | jq -r '.message.content // empty')
             ;;
         *)
             echo "Error: Unknown AGENT_BACKEND=$AGENT_BACKEND" >&2
