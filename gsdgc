@@ -14,8 +14,19 @@ if [ -f "$SCRIPT_DIR/.env" ]; then
     export $(grep -v '^#' "$SCRIPT_DIR/.env" | xargs)
 fi
 
-# Source the groq-agent-executor functions
-source "$SCRIPT_DIR/groq-simple-agent.sh"
+# Default backend
+: "${AGENT_BACKEND:=groq}"
+
+# Source the appropriate agent backend
+case "$AGENT_BACKEND" in
+    groq)
+        source "$SCRIPT_DIR/agents/groq/groq-simple-agent.sh"
+        ;;
+    *)
+        echo "Error: Unknown AGENT_BACKEND=$AGENT_BACKEND" >&2
+        exit 1
+        ;;
+esac
 
 # Function to call Groq API with retry/backoff
 call_groq() {

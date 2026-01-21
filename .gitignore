@@ -15,6 +15,12 @@ package-lock.json
 logs/
 .gsdgc/debug.log
 
+# Test/build artifacts
+test-*/
+test-final/
+build/
+dist/
+
 # OS files
 .DS_Store
 Thumbs.db
