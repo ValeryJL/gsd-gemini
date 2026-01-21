@@ -121,7 +121,7 @@ fi
 GEMINI_PROMPT="$PERSONA
 
 Contexto: $CONTEXT_DIR (no crees nuevas carpetas de proyecto; trabaja aquí).
-Memoria: ./.gsdgc/context.md, decisions.md, todos.md. Úsalos/actualízalos; cada iteración es un sprint de Scrum.
+Memoria del proyecto (rutas ABSOLUTAS - NO las cambies): $CONTEXT_DIR/.gsdgc/context.md, $CONTEXT_DIR/.gsdgc/decisions.md, $CONTEXT_DIR/.gsdgc/todos.md. Úsalos/actualízalos; cada iteración es un sprint de Scrum. NUNCA crees decisions.md o todos.md fuera de .gsdgc/.
 Tarea: \"$TASK_DESC\"
 
 Respeta el lenguaje solicitado; si no se especifica, prioriza Python. No uses npm/node ni generes proyectos JS salvo que se pida explícitamente. No escribas código ni archivos en .gsdgc (solo context/decisions/todos). Evita instalaciones/config pesadas (pip install/setup.py) salvo requerimiento explícito; prefiere stdlib y cambios mínimos. Devuelve JSON de acciones o resumen final corto (<=60 palabras)."

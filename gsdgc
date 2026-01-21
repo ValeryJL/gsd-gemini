@@ -135,7 +135,7 @@ while true; do
 
     # 1. PLANNING STEP
     echo "Planning... Asking for a task breakdown."
-    PLANNER_PROMPT="Eres planner. Devuelve solo JSON: {\"tasks\":[{\"agent\":role,\"task_description\":texto}]}. Tareas atómicas, en orden. Roles: $AVAILABLE_AGENTS. Objetivo: \"$CURRENT_PROMPT\". No crees nuevas carpetas de proyecto; trabaja en el directorio actual. Usa los archivos ./.gsdgc/context.md, decisions.md, todos.md para contexto y actualízalos como parte del trabajo (cada iteración es un sprint de Scrum)."
+    PLANNER_PROMPT="Eres planner. Devuelve solo JSON: {\"tasks\":[{\"agent\":role,\"task_description\":texto}]}. Tareas atómicas, en orden. Roles: $AVAILABLE_AGENTS. Objetivo: \"$CURRENT_PROMPT\". No crees nuevas carpetas de proyecto; trabaja en el directorio actual. IMPORTANTE: Usa SOLO estos archivos para memoria del proyecto (rutas absolutas): $(pwd)/.gsdgc/context.md, $(pwd)/.gsdgc/decisions.md, $(pwd)/.gsdgc/todos.md. Actualízalos como parte del trabajo (cada iteración es un sprint de Scrum). NO crees decisions.md ni todos.md fuera de .gsdgc/."
     log_debug "PLANNER PROMPT:\n$PLANNER_PROMPT"
     
     TASK_LIST_RESPONSE=$(call_api "$PLANNER_PROMPT")
